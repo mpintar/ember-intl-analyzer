@@ -191,12 +191,16 @@ async function findInRepoFiles(cwd, userExtensions) {
 
 async function findInMonoRepoFiles(cwd, userExtensions) {
   // let inRepoPaths = ['frontend/']
-  let inRepoFolders = [
-    'frontend/addons/anvil/src',
-    'frontend/addons/forge/src',
-    'frontend/apps/ui/app',
-  ];
+  let addons = ['anvil', 'forge', 'data'];
+  let addonFolders = joinPaths('frontend/addons', addons);
+  let addonSrcFolders = addonFolders.map(directory => `${directory}/src`);
+
+  let apps = ['ui', 'user-ui', 'watcher', 'deployment-ui'];
+  let appFolders = joinPaths('frontend/apps/', apps, '/app');
+  let appSrcFolders = appFolders.map(directory => `${directory}/app`);
+  // let inRepoFolders = ['frontend/addons/anvil/src', 'frontend/addons/forge/src', 'frontend/apps/ui/app'];
   // let inRepoFolders = ['frontend/addons/forge/src'];
+  let inRepoFolders = [...addonSrcFolders, ...appSrcFolders];
 
   let extensions = [...DEFAULT_EXTENSIONS, ...userExtensions];
   let pathsWithExtensions = extensions.map(extension => `**/*${extension}`);
