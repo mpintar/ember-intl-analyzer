@@ -1,3 +1,5 @@
+// Copyright (c) 2019 - 2024 Mainmatter GmbH and contributors
+// https://github.com/mainmatter/ember-intl-analyzer?tab=MIT-1-ov-file
 'use strict';
 
 const fs = require('fs');
@@ -38,7 +40,7 @@ async function run(rootDir, options = {}) {
   let includeGtsExtension = userExtensions.includes('.gts');
 
   userExtensions = userExtensions.map(extension =>
-    extension.startsWith('.') ? extension : `.${extension}`
+    extension.startsWith('.') ? extension : `.${extension}`,
   );
   let analyzeOptions = {
     analyzeConcatExpression,
@@ -51,7 +53,7 @@ async function run(rootDir, options = {}) {
   log(`${step(1)} 🔍  Finding JS and HBS files...`);
   let appFiles = await findAppFiles(rootDir, userExtensions);
   let inRepoFiles = await findInRepoFiles(rootDir, userExtensions);
-  let monoRepoFiles = await findInMonoRepoFiles(rootDir, userExtensions);
+  let monoRepoFiles = await findInMonoRepoFiles(rootDir, userExtensions, config.monoRepoFolders);
   let files = [...appFiles, ...inRepoFiles, ...monoRepoFiles];
 
   log(`${step(2)} 🔍  Searching for translations keys in JS and HBS files...`);
@@ -62,46 +64,50 @@ async function run(rootDir, options = {}) {
   let ownTranslationFiles = await findOwnTranslationFiles(rootDir, config);
   let externalTranslationFiles = await findExternalTranslationFiles(rootDir, config);
   let monoRepoTranslationFiles = await findMonoRepoTranslationFiles(rootDir, config);
+  let otherTranslationFiles = await findOtherTranslationFiles(rootDir, config);
   let existingOwnTranslationKeys = await analyzeTranslationFiles(
     rootDir,
     ownTranslationFiles,
-    wrapTranslationsWithNamespace
+    wrapTranslationsWithNamespace,
   );
   let existingExternalTranslationKeys = await analyzeTranslationFiles(
     rootDir,
     externalTranslationFiles,
-    wrapTranslationsWithNamespace
+    wrapTranslationsWithNamespace,
   );
 
   let existingMonoRepoTranslationKeys = await analyzeTranslationFiles(
     rootDir,
     monoRepoTranslationFiles,
-    wrapTranslationsWithNamespace
+    wrapTranslationsWithNamespace,
   );
-  // let existingTranslationKeys = mergeMaps(
-  //   existingOwnTranslationKeys,
-  //   existingExternalTranslationKeys,
-  //   existingMonoRepoTranslationKeys
-  // );
-  let existingTranslationKeys = existingMonoRepoTranslationKeys;
+
+  let mainTranslationKeys = existingMonoRepoTranslationKeys;
+  let mainTranslationKeysSet = new Set(mainTranslationKeys.keys());
+  const otherLanguageKeys = await Promise.all(otherTranslationFiles.map(async file => {
+    const translationFileKeys = await analyzeTranslationFiles(rootDir, [file], wrapTranslationsWithNamespace)
+    const translationFileKeysSet = new Set(translationFileKeys.keys());
+    return { set: translationFileKeysSet, file };
+  }));
+
   let whitelist = config.whitelist || [];
   let usedWhitelistEntries = new Set();
   let errorOnUnusedWhitelistEntries = config.errorOnUnusedWhitelistEntries || false;
 
   let unusedTranslations = findDifferenceInTranslations(
-    existingTranslationKeys,
+    mainTranslationKeys,
     usedTranslationKeys,
     whitelist,
-    usedWhitelistEntries
+    usedWhitelistEntries,
   );
 
   log(`${step(4)} ⚙️   Checking for missing translations...`);
   log();
   let missingTranslations = findDifferenceInTranslations(
     usedTranslationKeys,
-    existingTranslationKeys,
+    mainTranslationKeys,
     whitelist,
-    usedWhitelistEntries
+    usedWhitelistEntries,
   );
 
   let unusedWhitelistEntries = new Set(whitelist);
@@ -132,13 +138,30 @@ async function run(rootDir, options = {}) {
       log(`   - ${key} ${chalk.dim(`(used in ${generateFileList(files)})`)}`);
     }
   }
+  log();
+
+  let missingKeysCount = 0;
+  for (let otherTranslationKeyMap of otherLanguageKeys) {
+    const difference = mainTranslationKeysSet.difference(otherTranslationKeyMap.set);
+    if (difference.size === 0) {
+      log(` 👏  No missing translation keys were found in ${otherTranslationKeyMap.file}!`);
+      continue;
+    }
+
+    log(`Found ${chalk.bold.yellow(difference.size)} missing keys in ${otherTranslationKeyMap.file}:`);
+    log();
+    missingKeysCount += difference.size;
+    for (let key of difference) {
+      log(` - ${key} (missing in ${otherTranslationKeyMap.file})`);
+    }
+    log();
+  }
 
   if (unusedWhitelistEntries.size > 0) {
     log();
     log(
-      ` ⚠️   Found ${chalk.bold.yellow(unusedWhitelistEntries.size)} unused whitelist ${
-        unusedWhitelistEntries.size === 1 ? 'entry' : 'entries'
-      }! Please remove ${unusedWhitelistEntries.size === 1 ? 'it' : 'them'} from the whitelist:`
+      ` ⚠️   Found ${chalk.bold.yellow(unusedWhitelistEntries.size)} unused whitelist ${unusedWhitelistEntries.size === 1 ? 'entry' : 'entries'
+      }! Please remove ${unusedWhitelistEntries.size === 1 ? 'it' : 'them'} from the whitelist:`,
     );
     log();
     for (let entry of unusedWhitelistEntries) {
@@ -149,6 +172,7 @@ async function run(rootDir, options = {}) {
   let totalErrors =
     missingTranslations.size +
     unusedTranslations.size +
+    missingKeysCount +
     (errorOnUnusedWhitelistEntries ? unusedWhitelistEntries.size : 0);
 
   if (shouldFix) {
@@ -165,8 +189,9 @@ function readConfig(cwd) {
 
   let config = {};
   if (fs.existsSync(configPath)) {
-    let requireESM = require('esm')(module, { cjs: { dedefault: true } });
-    config = requireESM(configPath);
+    delete require.cache[require.resolve(configPath)];
+    config = require(configPath);
+    config = config.default || config;
   }
 
   return config;
@@ -175,7 +200,6 @@ function readConfig(cwd) {
 async function findAppFiles(cwd, userExtensions) {
   let extensions = [...DEFAULT_EXTENSIONS, ...userExtensions];
   let pathsWithExtensions = extensions.map(extension => 'app/**/*' + extension);
-  // let pathsWithExtensions = extensions.map(extension => 'frontend/addons/forge/src/**/*' + extension);
   return globby(pathsWithExtensions, { cwd });
 }
 
@@ -189,23 +213,11 @@ async function findInRepoFiles(cwd, userExtensions) {
   return globby(joinPaths(inRepoFolders, pathsWithExtensions), { cwd });
 }
 
-async function findInMonoRepoFiles(cwd, userExtensions) {
-  // let inRepoPaths = ['frontend/']
-  let addons = ['anvil', 'forge', 'data'];
-  let addonFolders = joinPaths('frontend/addons', addons);
-  let addonSrcFolders = addonFolders.map(directory => `${directory}/src`);
-
-  let apps = ['ui', 'user-ui', 'watcher', 'deployment-ui'];
-  let appFolders = joinPaths('frontend/apps/', apps, '/app');
-  let appSrcFolders = appFolders.map(directory => `${directory}/app`);
-  // let inRepoFolders = ['frontend/addons/anvil/src', 'frontend/addons/forge/src', 'frontend/apps/ui/app'];
-  // let inRepoFolders = ['frontend/addons/forge/src'];
-  let inRepoFolders = [...addonSrcFolders, ...appSrcFolders];
-
+async function findInMonoRepoFiles(cwd, userExtensions, monoRepoFolders) {
   let extensions = [...DEFAULT_EXTENSIONS, ...userExtensions];
   let pathsWithExtensions = extensions.map(extension => `**/*${extension}`);
 
-  const paths = joinPaths(inRepoFolders, pathsWithExtensions);
+  const paths = joinPaths(monoRepoFolders, pathsWithExtensions);
   return globby(paths, { cwd });
 }
 
@@ -223,13 +235,22 @@ async function findExternalTranslationFiles(cwd, config) {
 
 async function findMonoRepoTranslationFiles(cwd, config) {
   const paths = joinPaths(
-    'frontend/addons/intl',
-    config.translationFiles || ['**/*.json', '**/*.yaml', '**/*.yml']
+    config.monoRepoTranslationPath,
+    config.translationFiles || ['**/*.json', '**/*.yaml', '**/*.yml'],
   );
   return globby(paths, {
     cwd,
   });
-  // return findTranslationFiles(cwd, ['frontend/intl'], config);
+}
+
+async function findOtherTranslationFiles(cwd, config) {
+  const paths = joinPaths(
+    config.monoRepoTranslationPath,
+    config.otherTranslationFiles,
+  );
+  return globby(paths, {
+    cwd,
+  });
 }
 
 async function findTranslationFiles(cwd, inputFolders, config) {
@@ -237,7 +258,7 @@ async function findTranslationFiles(cwd, inputFolders, config) {
 
   const paths = joinPaths(
     translationPaths,
-    config.translationFiles || ['**/*.json', '**/*.yaml', '**/*.yml']
+    config.translationFiles || ['**/*.json', '**/*.yaml', '**/*.yml'],
   );
   return globby(paths, {
     cwd,
@@ -489,7 +510,7 @@ async function analyzeTranslationFiles(cwd, files, wrapTranslationsWithNamespace
 
         existingTranslationKeys.get(key).add(file);
       },
-      prefix
+      prefix,
     );
   }
   return existingTranslationKeys;
